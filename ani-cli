@@ -3,7 +3,7 @@
 version_number="4.10.4"
 
 # PROVIDER CONFIGURATION
-provider="${ANI_CLI_PROVIDER:-}"  # netflix or allanime
+provider="${ANI_CLI_PROVIDER:-}" 
 
 # Netflix Mirror Configuration
 netflix_main="https://net20.cc"
@@ -19,12 +19,6 @@ jiohotstar_cookie=""
 primevideo_main="https://net20.cc"
 primevideo_new="https://net51.cc"
 primevideo_cookie=""
-
-# HiAnime Configuration
-hianime_base="https://hianime.to"
-hianime_ajax="https://hianime.to/ajax/v2"
-megacloud_api="https://crawlr.cc/9D7F1B3E8"
-hianime_sub_or_dub="sub"  # sub or dub preference
 
 # AnimePahe Configuration
 animepahe_base="https://animepahe.si"
@@ -103,8 +97,6 @@ help_info() {
         Specify the number of episodes to watch
       --dub
         Play dubbed version
-      --sub
-        Play subbed version (default for HiAnime)
       --rofi
         Use rofi instead of fzf for the interactive menu
       --skip
@@ -127,8 +119,6 @@ help_info() {
         Use JioHotstar (Mirror) as the provider
       --primevideo
         Use PrimeVideo (Mirror) as the provider
-      --hianime
-        Use HiAnime as the provider (anime)
       --animepahe
         Use AnimePahe as the provider (anime)
       --global
@@ -152,7 +142,7 @@ version_info() {
 }
 
 update_script() {
-    update="$(curl -s -A "$agent" "https://raw.githubusercontent.com/ToonTamilIndia/ani-cli/master/ani-cli")" || die "Connection error"
+    update="$(curl -s -A "$agent" "https://raw.githubusercontent.com/pystardust/ani-cli/master/ani-cli")" || die "Connection error"
     update="$(printf '%s\n' "$update" | diff -u "$0" -)"
     if [ -z "$update" ]; then
         printf "Script is up to date :)\n"
@@ -964,281 +954,6 @@ primevideo_get_episode_url() {
 }
 
 # ================================
-# HIANIME PROVIDER FUNCTIONS
-# ================================
-
-# Search HiAnime for anime
-hianime_search() {
-    query="$1"
-    debug_log "hianime_search: query=$query"
-    
-    search_url="${hianime_base}/search?keyword=$(printf '%s' "$query" | sed 's/+/%20/g')"
-    debug_log "Search URL: $search_url"
-    
-    # Fetch search page and extract anime cards
-    response=$(curl -s "$search_url" \
-        -H "User-Agent: $agent" \
-        -H "Referer: ${hianime_base}/" \
-        -H "Accept: text/html,application/xhtml+xml" 2>/dev/null)
-    
-    # Extract anime entries - look for film_list-wrap structure
-    # Each item has: data-id, href, title (keep original order, use awk to remove duplicates while preserving order)
-    printf "%s" "$response" | grep -oE '<a[^>]*href="/watch/[^"]*"[^>]*title="[^"]*"' | while read -r line; do
-        href=$(printf "%s" "$line" | sed -nE 's/.*href="([^"]*)".*/\1/p')
-        title=$(printf "%s" "$line" | sed -nE 's/.*title="([^"]*)".*/\1/p')
-        # Extract anime ID from href (e.g., /watch/one-piece-100 -> one-piece-100)
-        anime_id=$(printf "%s" "$href" | sed 's|^/watch/||; s|?.*||')
-        [ -n "$anime_id" ] && [ -n "$title" ] && printf "%s\t%s\t%s\n" "$anime_id" "$title" "[HiAnime]"
-    done | awk '!seen[$1]++'
-}
-
-# Get HiAnime anime details
-hianime_get_details() {
-    anime_id="$1"
-    debug_log "hianime_get_details: anime_id=$anime_id"
-    
-    # Extract just the numeric ID from the end of anime slug
-    anime_num=$(printf "%s" "$anime_id" | grep -oE '[0-9]+$')
-    [ -z "$anime_num" ] && anime_num="$anime_id"
-    debug_log "Anime numeric ID: $anime_num"
-    
-    watch_url="${hianime_base}/watch/${anime_id}"
-    debug_log "Watch URL: $watch_url"
-    
-    response=$(curl -s "$watch_url" \
-        -H "User-Agent: $agent" \
-        -H "Referer: ${hianime_base}/" 2>/dev/null)
-    
-    # Extract title from page
-    page_title=$(printf "%s" "$response" | grep -oE '<title>[^<]+</title>' | head -1 | sed 's/<[^>]*>//g; s/ - HiAnime.*//; s/Watch //; s/ English.*//; s/ Online.*//')
-    [ -z "$page_title" ] && page_title="$anime_id"
-    
-    printf "%s" "$page_title"
-}
-
-# Get episode list for HiAnime anime
-hianime_episodes_list() {
-    anime_id="$1"
-    debug_log "hianime_episodes_list: anime_id=$anime_id"
-    
-    # Extract numeric ID from the end of anime slug (e.g., one-piece-100 -> 100)
-    anime_num=$(printf "%s" "$anime_id" | grep -oE '[0-9]+$')
-    [ -z "$anime_num" ] && die "Could not extract anime ID from: $anime_id"
-    debug_log "Anime numeric ID: $anime_num"
-    
-    # Fetch episode list via AJAX endpoint
-    episodes_url="${hianime_ajax}/episode/list/${anime_num}"
-    debug_log "Episodes URL: $episodes_url"
-    
-    response=$(curl -s "$episodes_url" \
-        -H "User-Agent: $agent" \
-        -H "X-Requested-With: XMLHttpRequest" \
-        -H "Referer: ${hianime_base}/watch/${anime_id}" 2>/dev/null)
-    
-    debug_log "Episodes response (first 500 chars): $(printf '%.500s' "$response")"
-    
-    # Parse episode list - use jq if available, otherwise fallback
-    if command -v jq >/dev/null 2>&1; then
-        html_content=$(printf "%s" "$response" | jq -r '.html' 2>/dev/null)
-    else
-        # Fallback: use python or sed to decode JSON
-        if command -v python3 >/dev/null 2>&1; then
-            html_content=$(printf "%s" "$response" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['html'])" 2>/dev/null)
-        else
-            # Last resort: basic sed decoding (may not work perfectly)
-            html_content=$(printf "%s" "$response" | sed 's/.*"html":"//; s/",".*//; s/\\n/\n/g; s/\\"/"/g; s/\\\//\//g')
-        fi
-    fi
-    
-    # Extract episode numbers from data-number attributes
-    printf "%s" "$html_content" | grep -oE 'data-number="[0-9]+"' | sed 's/data-number="//; s/"//' | sort -n
-}
-
-# Get episode server ID
-hianime_get_episode_id() {
-    anime_id="$1"
-    target_episode="$2"
-    debug_log "hianime_get_episode_id: anime_id=$anime_id, target_episode=$target_episode"
-    
-    # Extract numeric anime ID
-    anime_num=$(printf "%s" "$anime_id" | grep -oE '[0-9]+$')
-    [ -z "$anime_num" ] && return 1
-    
-    # Fetch episode list to get episode data-id
-    episodes_url="${hianime_ajax}/episode/list/${anime_num}"
-    response=$(curl -s "$episodes_url" \
-        -H "User-Agent: $agent" \
-        -H "X-Requested-With: XMLHttpRequest" \
-        -H "Referer: ${hianime_base}/watch/${anime_id}" 2>/dev/null)
-    
-    # Parse JSON to get HTML content
-    if command -v jq >/dev/null 2>&1; then
-        html_content=$(printf "%s" "$response" | jq -r '.html' 2>/dev/null)
-    else
-        if command -v python3 >/dev/null 2>&1; then
-            html_content=$(printf "%s" "$response" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['html'])" 2>/dev/null)
-        else
-            html_content=$(printf "%s" "$response" | sed 's/.*"html":"//; s/",".*//; s/\\n/\n/g; s/\\"/"/g; s/\\\//\//g')
-        fi
-    fi
-    
-    # Find the episode with matching data-number and get its data-id from next line
-    # Pattern: data-number="X" followed on next line by data-id="Y"
-    episode_data_id=$(printf "%s" "$html_content" | grep -A1 "data-number=\"$target_episode\"" | grep -oE 'data-id="[0-9]+"' | head -1 | sed 's/data-id="//; s/"//')
-    
-    debug_log "Episode data-id: $episode_data_id"
-    printf "%s" "$episode_data_id"
-}
-
-# Get streaming URL for HiAnime episode
-hianime_get_episode_url() {
-    debug_log "hianime_get_episode_url: id=$id, ep_no=$ep_no"
-    
-    cache_dir="$(mktemp -d)"
-    
-    # Get episode data-id
-    episode_data_id=$(hianime_get_episode_id "$id" "$ep_no")
-    [ -z "$episode_data_id" ] && die "Episode not found!"
-    debug_log "Got episode data-id: $episode_data_id"
-    
-    # Get available servers for this episode
-    servers_url="${hianime_ajax}/episode/servers?episodeId=${episode_data_id}"
-    debug_log "Servers URL: $servers_url"
-    
-    servers_response=$(curl -s "$servers_url" \
-        -H "User-Agent: $agent" \
-        -H "X-Requested-With: XMLHttpRequest" \
-        -H "Referer: ${hianime_base}/watch/${id}" 2>/dev/null)
-    
-    debug_log "Servers response (first 500 chars): $(printf '%.500s' "$servers_response")"
-    
-    # Parse JSON to get HTML content
-    if command -v jq >/dev/null 2>&1; then
-        servers_html=$(printf "%s" "$servers_response" | jq -r '.html' 2>/dev/null)
-    else
-        if command -v python3 >/dev/null 2>&1; then
-            servers_html=$(printf "%s" "$servers_response" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['html'])" 2>/dev/null)
-        else
-            servers_html=$(printf "%s" "$servers_response" | sed 's/.*"html":"//; s/",".*//; s/\\n/\n/g; s/\\"/"/g; s/\\\//\//g')
-        fi
-    fi
-    
-    debug_log "Servers HTML (first 500 chars): $(printf '%.500s' "$servers_html")"
-    
-    # Server mapping: data-server-id: 1=VidCloud/MegaCloud, 4=VidStreaming, 3=StreamTape, 6=Filemoon
-    # Pattern spans multiple lines:
-    # <div class="item server-item" data-type="sub" data-id="31995"
-    #      data-server-id="1">
-    # Use grep -A1 to capture both lines, then filter
-    
-    # Determine preferred type based on sub/dub preference
-    preferred_type="$hianime_sub_or_dub"
-    fallback_type="sub"
-    [ "$preferred_type" = "sub" ] && fallback_type="dub"
-    [ "$preferred_type" = "dub" ] && fallback_type="sub"
-    debug_log "Preferred audio type: $preferred_type, fallback: $fallback_type"
-    
-    # First try VidCloud (server-id=1) with preferred type - best quality
-    server_id=$(printf "%s" "$servers_html" | grep -A1 "server-item.*data-type=\"$preferred_type\"" | grep -B1 'data-server-id="1"' | head -1 | grep -oE 'data-id="[0-9]+"' | sed 's/data-id="//; s/"//')
-    debug_log "VidCloud $preferred_type server: $server_id"
-    
-    # Try VidStreaming (server-id=4) with preferred type
-    [ -z "$server_id" ] && server_id=$(printf "%s" "$servers_html" | grep -A1 "server-item.*data-type=\"$preferred_type\"" | grep -B1 'data-server-id="4"' | head -1 | grep -oE 'data-id="[0-9]+"' | sed 's/data-id="//; s/"//')
-    debug_log "VidStreaming $preferred_type server: $server_id"
-    
-    # Try Filemoon (server-id=6) with preferred type
-    [ -z "$server_id" ] && server_id=$(printf "%s" "$servers_html" | grep -A1 "server-item.*data-type=\"$preferred_type\"" | grep -B1 'data-server-id="6"' | head -1 | grep -oE 'data-id="[0-9]+"' | sed 's/data-id="//; s/"//')
-    debug_log "Filemoon $preferred_type server: $server_id"
-    
-    # Try any server with preferred type (fallback)
-    [ -z "$server_id" ] && server_id=$(printf "%s" "$servers_html" | grep "server-item.*data-type=\"$preferred_type\"" | head -1 | grep -oE 'data-id="[0-9]+"' | sed 's/data-id="//; s/"//')
-    debug_log "Any $preferred_type server: $server_id"
-    
-    # Try VidCloud with fallback type
-    [ -z "$server_id" ] && server_id=$(printf "%s" "$servers_html" | grep -A1 "server-item.*data-type=\"$fallback_type\"" | grep -B1 'data-server-id="1"' | head -1 | grep -oE 'data-id="[0-9]+"' | sed 's/data-id="//; s/"//')
-    debug_log "VidCloud $fallback_type server: $server_id"
-    
-    # Try any server with fallback type
-    [ -z "$server_id" ] && server_id=$(printf "%s" "$servers_html" | grep "server-item.*data-type=\"$fallback_type\"" | head -1 | grep -oE 'data-id="[0-9]+"' | sed 's/data-id="//; s/"//')
-    debug_log "Any $fallback_type server: $server_id"
-    
-    [ -z "$server_id" ] && die "No streaming servers available!"
-    debug_log "Selected server ID: $server_id"
-    
-    # Get the source/embed URL for this server
-    sources_url="${hianime_ajax}/episode/sources?id=${server_id}"
-    debug_log "Sources URL: $sources_url"
-    
-    sources_response=$(curl -s "$sources_url" \
-        -H "User-Agent: $agent" \
-        -H "X-Requested-With: XMLHttpRequest" \
-        -H "Referer: ${hianime_base}/watch/${id}" 2>/dev/null)
-    
-    debug_log "Sources response: $sources_response"
-    
-    # Extract embed link - format: {"type":"iframe","link":"https://megacloud.blog/embed-2/..."}
-    embed_link=$(printf "%s" "$sources_response" | sed 's/\\//g' | grep -oE '"link":"[^"]+"' | head -1 | sed 's/"link":"//; s/"$//')
-    
-    [ -z "$embed_link" ] && die "Could not get embed link!"
-    debug_log "Embed link: $embed_link"
-    
-    # Use MegaCloud API to extract actual video sources
-    encoded_embed=$(printf "%s" "$embed_link" | sed 's|:|%3A|g; s|/|%2F|g; s|?|%3F|g; s|=|%3D|g; s|&|%26|g')
-    megacloud_url="${megacloud_api}?url=${encoded_embed}"
-    debug_log "MegaCloud API URL: $megacloud_url"
-    
-    megacloud_response=$(curl -s "$megacloud_url" \
-        -H "User-Agent: $agent" \
-        -H "Referer: ${hianime_base}/" 2>/dev/null)
-    
-    debug_log "MegaCloud response (first 1000 chars): $(printf '%.1000s' "$megacloud_response")"
-    
-    # Extract video sources from MegaCloud response using jq if available
-    links=""
-    
-    if command -v jq >/dev/null 2>&1; then
-        # Use jq to extract sources
-        m3u8_url=$(printf "%s" "$megacloud_response" | jq -r '.sources[0].url // empty' 2>/dev/null)
-        quality=$(printf "%s" "$megacloud_response" | jq -r '.sources[0].quality // "auto"' 2>/dev/null)
-        [ -n "$m3u8_url" ] && links="${quality} >${m3u8_url}"
-    else
-        # Fallback: regex extraction
-        m3u8_url=$(printf "%s" "$megacloud_response" | grep -oE '"url"[[:space:]]*:[[:space:]]*"[^"]+\.m3u8[^"]*"' | head -1 | sed 's/"url"[[:space:]]*:[[:space:]]*"//; s/"$//')
-        [ -n "$m3u8_url" ] && links="auto >${m3u8_url}"
-    fi
-    
-    debug_log "Extracted links: $links"
-    
-    [ -z "$links" ] && die "No video sources found!"
-    
-    # Extract subtitles from tracks
-    if command -v jq >/dev/null 2>&1; then
-        subtitle=$(printf "%s" "$megacloud_response" | jq -r '.tracks[] | select(.label | test("english"; "i")) | .url // .file' 2>/dev/null | head -1)
-        [ -z "$subtitle" ] && subtitle=$(printf "%s" "$megacloud_response" | jq -r '.tracks[0].url // .tracks[0].file // empty' 2>/dev/null)
-    else
-        subtitle=$(printf "%s" "$megacloud_response" | grep -oE '"url"[[:space:]]*:[[:space:]]*"[^"]+\.vtt[^"]*"' | head -1 | sed 's/"url"[[:space:]]*:[[:space:]]*"//; s/"$//')
-        [ -z "$subtitle" ] && subtitle=$(printf "%s" "$megacloud_response" | grep -oE '"file"[[:space:]]*:[[:space:]]*"[^"]+\.vtt[^"]*"' | head -1 | sed 's/"file"[[:space:]]*:[[:space:]]*"//; s/"$//')
-    fi
-    
-    if [ -n "$subtitle" ]; then
-        subs_flag="--sub-file=$subtitle"
-        debug_log "Subtitle: $subtitle"
-    fi
-    
-    # Set referrer for playback (use headers from API response if available)
-    refr_flag="--referrer=${hianime_base}/"
-    
-    # Select quality
-    printf "%s" "$links" > "$cache_dir/links"
-    select_quality "$quality"
-    
-    rm -r "$cache_dir" 2>/dev/null
-    
-    [ -z "$episode" ] && die "No valid video sources found!"
-    debug_log "Selected video URL: $episode"
-}
-
-# ================================
 # ANIMEPAHE PROVIDER FUNCTIONS
 # ================================
 
@@ -1968,26 +1683,6 @@ $(printf "%s" "$allanime_results" | sed 's/^/allanime\t/')"
         printf "  \033[90mNo results found\033[0m\n" >&2
     fi
     
-    # Search HiAnime (limit to 5)
-    printf "\n\033[1;35m[HiAnime]\033[0m\n" >&2
-    hianime_results=$(hianime_search "$query" 2>/dev/null | head -5)
-    if [ -n "$hianime_results" ]; then
-        count=1
-        printf "%s\n" "$hianime_results" | while IFS= read -r line; do
-            title=$(printf "%s" "$line" | cut -f2)
-            printf "  %d. %s\n" "$count" "$title" >&2
-            count=$((count + 1))
-        done
-        if [ -n "$combined_results" ]; then
-            combined_results="$combined_results
-$(printf "%s" "$hianime_results" | sed 's/^/hianime\t/')"
-        else
-            combined_results=$(printf "%s" "$hianime_results" | sed 's/^/hianime\t/')
-        fi
-    else
-        printf "  \033[90mNo results found\033[0m\n" >&2
-    fi
-    
     # Search AnimePahe (limit to 5)
     printf "\n\033[1;35m[AnimePahe]\033[0m\n" >&2
     animepahe_results=$(animepahe_search "$query" 2>/dev/null | head -5)
@@ -2021,8 +1716,7 @@ select_provider() {
 3	jiohotstar	JioHotstar (Mirror)
 4	primevideo	PrimeVideo (Mirror)
 5	allanime	AllAnime (Anime)
-6	hianime	HiAnime (Anime)
-7	animepahe	AnimePahe (Anime)"
+6	animepahe	AnimePahe (Anime)"
         provider_choice=$(printf "%s" "$provider_list" | nth "Select provider: ")
         [ -z "$provider_choice" ] && exit 1
         # Get the provider name (second field), not the number
@@ -2093,7 +1787,7 @@ generate_link() {
         1) provider_init "wixmp" "/Default :/p" ;;    # wixmp(default)(m3u8)(multi) -> (mp4)(multi)
         2) provider_init "youtube" "/Yt-mp4 :/p" ;;   # youtube(mp4)(single)
         3) provider_init "sharepoint" "/S-mp4 :/p" ;; # sharepoint(mp4)(single)
-        *) provider_init "hianime" "/Luf-Mp4 :/p" ;;  # hianime(m3u8)(multi)
+        *) provider_init "wixmp" "/Default :/p" ;;    # fallback to wixmp
     esac
     [ -n "$provider_id" ] && get_links "$provider_id"
 }
@@ -2137,12 +1831,6 @@ get_episode_url() {
     # Use PrimeVideo provider if selected
     if [ "$provider" = "primevideo" ]; then
         primevideo_get_episode_url
-        return
-    fi
-    
-    # Use HiAnime provider if selected
-    if [ "$provider" = "hianime" ]; then
-        hianime_get_episode_url
         return
     fi
     
@@ -2380,8 +2068,6 @@ play_episode() {
                 nohup $player_function --http-referrer="${jiohotstar_new}/" --play-and-exit --meta-title="${allanime_title}Episode ${ep_no}" ":http-user-agent=Mozilla/5.0" ":http-cookies=hd=on" $vlc_audio_opt $vlc_sub_opt "$episode" >/dev/null 2>&1 &
             elif [ "$provider" = "primevideo" ]; then
                 nohup $player_function --http-referrer="${primevideo_new}/" --play-and-exit --meta-title="${allanime_title}Episode ${ep_no}" ":http-user-agent=Mozilla/5.0" ":http-cookies=hd=on;ott=pv" $vlc_audio_opt $vlc_sub_opt "$episode" >/dev/null 2>&1 &
-            elif [ "$provider" = "hianime" ]; then
-                nohup $player_function --http-referrer="${hianime_base}/" --play-and-exit --meta-title="${allanime_title}Episode ${ep_no}" ":http-user-agent=Mozilla/5.0" $vlc_sub_opt "$episode" >/dev/null 2>&1 &
             elif [ "$provider" = "animepahe" ]; then
                 nohup $player_function --http-referrer="https://kwik.cx/" --play-and-exit --meta-title="${allanime_title}Episode ${ep_no}" ":http-user-agent=Mozilla/5.0" $vlc_sub_opt "$episode" >/dev/null 2>&1 &
             else
@@ -2517,8 +2203,7 @@ while [ $# -gt 0 ]; do
             ep_no="$2"
             shift
             ;;
-        --dub) mode="dub"; hianime_sub_or_dub="dub" ;;
-        --sub) hianime_sub_or_dub="sub" ;;
+        --dub) mode="dub" ;;
         --no-detach) no_detach=1 ;;
         --exit-after-play) exit_after_play=1 && no_detach=1 ;;
         --rofi) use_external_menu=1 ;;
@@ -2534,7 +2219,6 @@ while [ $# -gt 0 ]; do
         --allanime) provider="allanime" ;;
         --jiohotstar) provider="jiohotstar" ;;
         --primevideo) provider="primevideo" ;;
-        --hianime) provider="hianime" ;;
         --animepahe) provider="animepahe" ;;
         --global) provider="global" ;;
         --debug) debug_mode=1 ;;
@@ -2607,9 +2291,6 @@ case "$search" in
             primevideo)
                 anime_list=$(primevideo_search "$query")
                 ;;
-            hianime)
-                anime_list=$(hianime_search "$query")
-                ;;
             animepahe)
                 anime_list=$(animepahe_search "$query")
                 ;;
@@ -2660,9 +2341,6 @@ case "$search" in
             primevideo)
                 ep_list=$(primevideo_episodes_list "$id")
                 ;;
-            hianime)
-                ep_list=$(hianime_episodes_list "$id")
-                ;;
             animepahe)
                 ep_list=$(animepahe_episodes_list "$id")
                 ;;
@@ -2698,7 +2376,7 @@ printf "\033[1;90mUse the menu below to control playback:\033[0m\n\n" >&2
 # Build menu options based on provider
 if [ "$provider" = "netflix" ] || [ "$provider" = "jiohotstar" ] || [ "$provider" = "primevideo" ]; then
     menu_options="next\nreplay\nprevious\nselect\nchange_quality\nchange_audio\nchange_subtitle\nquit"
-elif [ "$provider" = "hianime" ] || [ "$provider" = "animepahe" ]; then
+elif [ "$provider" = "animepahe" ]; then
     menu_options="next\nreplay\nprevious\nselect\nchange_quality\nchange_sub_dub\nquit"
 else
     menu_options="next\nreplay\nprevious\nselect\nchange_quality\nquit"
@@ -2827,23 +2505,8 @@ EOF
             fi
             ;;
         change_sub_dub)
-            # Toggle between sub and dub for HiAnime and AnimePahe
-            if [ "$provider" = "hianime" ]; then
-                current_mode="$hianime_sub_or_dub"
-                if [ "$current_mode" = "sub" ]; then
-                    new_mode=$(printf "sub (current)\ndub" | nth "Select audio type: " | sed 's/ (current)//')
-                else
-                    new_mode=$(printf "sub\ndub (current)" | nth "Select audio type: " | sed 's/ (current)//')
-                fi
-                if [ -n "$new_mode" ] && [ "$new_mode" != "$current_mode" ]; then
-                    hianime_sub_or_dub="$new_mode"
-                    printf "\033[1;32mSwitched to: %s\033[0m\n" "$new_mode" >&2
-                    # Re-fetch episode with new sub/dub preference
-                    unset episode
-                else
-                    continue
-                fi
-            elif [ "$provider" = "animepahe" ]; then
+            # Toggle between sub and dub for AnimePahe
+            if [ "$provider" = "animepahe" ]; then
                 # AnimePahe: show available audio options from current sources
                 if [ -n "$animepahe_sources" ]; then
                     # Filter sources to show only sub or dub options
@@ -2899,7 +2562,7 @@ EOF
                     continue
                 fi
             else
-                printf "\033[1;31mSub/Dub toggle only available for HiAnime and AnimePahe\033[0m\n" >&2
+                printf "\033[1;31mSub/Dub toggle only available for AnimePahe\033[0m\n" >&2
                 continue
             fi
             ;;
